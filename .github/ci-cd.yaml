@@ -1,0 +1,112 @@
+name: Terraform Multi-Environment Deployment to OCI
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      compartment_id:
+        description: 'Target OCI Compartment ID for deployment'
+        required: true
+        type: string
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+env:
+  TF_VAR_tenancy_ocid: ${{ secrets.TENANCY_OCID }}
+  TF_VAR_user_ocid: ${{ secrets.USER_OCID }}
+  TF_VAR_fingerprint: ${{ secrets.FINGERPRINT }}
+  TF_VAR_private_key: ${{ secrets.PRIVATE_KEY }}
+  TF_VAR_region: ${{ secrets.REGION }}
+  ENVIRONMENT: ${{ inputs.environment }}
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.environment }} Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Create Terraform Variables File
+        run: |
+          cat > ${{ inputs.environment }}.tfvars << EOF
+          default_compartment_id = "${{ inputs.compartment_id }}"
+          default_defined_tags   = {}
+          default_freeform_tags  = {}
+          default_ad             = 1
+          file_systems = {
+            fs_1 = {
+              ad             = 1
+              compartment_id = "${{ inputs.compartment_id }}"
+              defined_tags   = {}
+              freeform_tags  = {}
+            }
+          }
+          mount_targets = {
+            fs1_mt1 = {
+              ad             = 1
+              subnet_id      = "${{ secrets.SUBNET_ID_${{ inputs.environment }} }}"
+              hostname_label = "fs1-mt1-${{ inputs.environment }}"
+              ip_address     = "10.0.20.100"
+              compartment_id = "${{ inputs.compartment_id }}"
+              defined_tags   = {}
+              freeform_tags  = {}
+              export_set = {
+                max_fs_stat_bytes = 5368709120
+                max_fs_stat_files = 10737418240
+              }
+              file_systems = {
+                "fs_1" = {
+                  path          = "/fs1"
+                  export_option = "standard_export_options"
+                }
+              }
+            }
+          }
+          export_options = {
+            standard_export_options = {
+              source                         = "0.0.0.0/0"
+              access                         = "READ_WRITE"
+              anonymous_gid                  = null
+              anonymous_uid                  = null
+              identity_squash                = "NONE"
+              require_privileged_source_port = "false"
+            }
+          }
+          EOF
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -diff -recursive
+
+      - name: Terraform Plan
+        if: inputs.action == 'plan' || inputs.action == 'apply'
+        run: terraform plan -var-file="${{ inputs.environment }}.tfvars" -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply'
+        run: terraform apply -auto-approve -var-file="${{ inputs.environment }}.tfvars"
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        run: terraform destroy -auto-approve -var-file="${{ inputs.environment }}.tfvars"
